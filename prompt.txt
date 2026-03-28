@@ -1,0 +1,32 @@
+Act as a Senior Systems Architect specializing in Low-Latency Distributed Systems and VoIP. 
+
+I want to build a high-performance, autonomous Voice AI orchestrator from scratch. 
+The system must be built in Python using a modular "Sandwich" architecture (STT -> LLM -> TTS) 
+but optimized for sub-500ms end-to-end latency to ensure human-like fluid conversation.
+
+### CORE REQUIREMENTS TO PLAN:
+1. TELEPHONY: Design a WebSocket-based integration for a telephony provider (like Twilio or Telnyx) 
+   that handles bidirectional L16 linear PCM audio streaming.
+2. ORCHESTRATION: Use LangGraph for state management, including a "Supervisor" 
+   router for multi-agent handoffs (e.g., technical support vs. scheduling) within a single call.
+3. INNOVATIVE FEATURES:
+   - Implement logic for "Semantic Barge-in" to distinguish between background noise/backchanneling 
+     and genuine user intent to interrupt.
+   - Design a "Predictive RAG" layer that prefetches context based on the predicted trajectory 
+     of the conversation.
+   - Plan a "Phonetic Normalization" layer to ensure the TTS engine accurately pronounces 
+     custom alphanumeric IDs and technical terms.
+4. OBSERVABILITY: Integrate LangSmith for real-time trace debugging and pinpointing 
+   latency bottlenecks in the pipeline.
+
+### YOUR TASK:
+1. Propose a high-level file structure for this repository.
+2. Define the 'State' schema for the LangGraph orchestrator.
+3. Write a 'Sequence Diagram' in Markdown illustrating the data flow from raw 
+   audio packet to the generated spoken response.
+4. Generate the boilerplate code for the 'AudioStreamHandler' class 
+   that manages the WebSocket connection and initial VAD (Voice Activity Detection).
+5. also tell me what backend should I use. Will fastapi work.
+6. Also tell me how can I    
+
+Begin by asking me which primary cloud provider and STT/TTS engine I want to use for the boilerplate.
