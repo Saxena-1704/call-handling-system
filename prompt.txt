@@ -29,4 +29,4 @@ but optimized for sub-500ms end-to-end latency to ensure human-like fluid conver
 5. also tell me what backend should I use. Will fastapi work.
 6. Also tell me how can I    
 
-Begin by asking me which primary cloud provider and STT/TTS engine I want to use for the boilerplate.
+make a plan for workflow and usable tech for each domain. Ask me questions whenever you want

@@ -1,0 +1,18 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+jinja2
+python-multipart
+
+# STT
+deepgram-sdk
+
+# LLM
+langchain
+langchain-groq
+
+# TTS
+cartesia
+
+# Audio
+numpy

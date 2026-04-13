@@ -1,0 +1,28 @@
+async def tts_websocket_continuations_async(client: AsyncCartesia) -> None:
+    """Streaming a transcript split into multiple parts, using continuations."""
+    transcripts = ["The only thing we have to fear ", "is ", "fear itself."]
+    output_format = {"container": "raw", "encoding": "pcm_f32le", "sample_rate": 44100}
+
+    async with client.tts.websocket_connect() as connection:
+        ctx = connection.context()
+
+        for transcript in transcripts:
+            await ctx.send(
+                model_id="sonic-3",
+                transcript=transcript,
+                voice={"mode": "id", "id": "6ccbfb76-1fc6-48f7-b71d-91ac6298247b"},
+                output_format=output_format,
+                continue_=True,
+            )
+
+        await ctx.no_more_inputs()
+
+        filename = f"tts_ws_continuations_async_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pcm"
+
+        with open(filename, "wb") as f:
+            async for response in ctx.receive():
+                if response.type == "chunk" and response.audio:
+                    f.write(response.audio)
+
+        print(f"Saved audio to {filename}")
+        print(f"Play with: ffplay -f f32le -ar 44100 {filename}")

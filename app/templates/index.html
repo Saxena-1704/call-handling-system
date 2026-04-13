@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Voice Assistant</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #0f0f0f;
+      color: #f0f0f0;
+      font-family: system-ui, sans-serif;
+    }
+
+    h1 { font-size: 1.4rem; font-weight: 500; margin-bottom: 2rem; color: #888; }
+
+    #btn {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      border: 3px solid #444;
+      background: #1a1a1a;
+      color: #f0f0f0;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      outline: none;
+    }
+
+    #btn.listening  { border-color: #e53e3e; background: #2d1111; }
+    #btn.thinking   { border-color: #d69e2e; background: #2d2211; }
+    #btn.speaking   { border-color: #38a169; background: #112d1a; }
+
+    #status {
+      margin-top: 1.5rem;
+      font-size: 0.9rem;
+      color: #666;
+      min-height: 1.2em;
+    }
+
+    #transcript {
+      margin-top: 2rem;
+      max-width: 480px;
+      width: 90%;
+      text-align: left;
+    }
+
+    .turn { margin-bottom: 1rem; line-height: 1.5; font-size: 0.9rem; }
+    .turn .label { font-size: 0.75rem; color: #555; margin-bottom: 0.2rem; }
+    .turn.user .text  { color: #90cdf4; }
+    .turn.ai   .text  { color: #9ae6b4; }
+  </style>
+</head>
+<body>
+
+<h1>Voice Assistant</h1>
+
+<button id="btn">Hold to Talk</button>
+<div id="status">Click and hold to speak</div>
+
+<div id="transcript"></div>
+
+<script>
+  const btn = document.getElementById('btn');
+  const statusEl = document.getElementById('status');
+  const transcriptEl = document.getElementById('transcript');
+
+  // ── WebSocket ─────────────────────────────────────────────────────
+  const ws = new WebSocket(`ws://${location.host}/ws/audio`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => setStatus('Ready');
+  ws.onclose = () => setStatus('Disconnected');
+  ws.onerror = () => setStatus('Connection error');
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') {
+      const msg = JSON.parse(event.data);
+
+      if (msg.type === 'transcript') {
+        appendTurn('user', msg.text);
+        setStatus('Thinking…');
+        setBtnState('thinking');
+      }
+      if (msg.type === 'response_text') {
+        appendTurn('ai', msg.text);
+      }
+      if (msg.type === 'tts_done') {
+        // Re-enable button only after all audio has been queued
+        if (!isPlaying) {
+          setBtnState('idle');
+          setStatus('Click and hold to speak');
+        }
+      }
+      if (msg.type === 'error') {
+        setStatus('Error: ' + msg.message);
+        setBtnState('idle');
+      }
+    } else {
+      enqueueAudio(event.data);
+    }
+  };
+
+  // ── AudioWorklet PCM streaming ────────────────────────────────────
+  // Inline processor: converts float32 mic samples → int16 PCM chunks
+  const _workletCode = `
+    class PCMProcessor extends AudioWorkletProcessor {
+      process(inputs) {
+        const ch = inputs[0][0];
+        if (ch) {
+          const int16 = new Int16Array(ch.length);
+          for (let i = 0; i < ch.length; i++) {
+            int16[i] = Math.max(-32768, Math.min(32767, ch[i] * 32768));
+          }
+          this.port.postMessage(int16.buffer, [int16.buffer]);
+        }
+        return true;
+      }
+    }
+    registerProcessor('pcm-processor', PCMProcessor);
+  `;
+  const _workletBlob = new Blob([_workletCode], { type: 'application/javascript' });
+  const _workletUrl  = URL.createObjectURL(_workletBlob);
+
+  let _micStream   = null;
+  let _workletNode = null;
+  let _recCtx      = null;   // separate AudioContext for recording at 16 kHz
+
+  async function startRecording() {
+    _micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    _recCtx    = new AudioContext({ sampleRate: 16000 });
+
+    await _recCtx.audioWorklet.addModule(_workletUrl);
+    const source     = _recCtx.createMediaStreamSource(_micStream);
+    _workletNode     = new AudioWorkletNode(_recCtx, 'pcm-processor');
+
+    _workletNode.port.onmessage = (e) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
+    };
+
+    source.connect(_workletNode);
+    setBtnState('listening');
+    setStatus('Listening…');
+  }
+
+  async function stopRecording() {
+    if (!_micStream) return;
+    // Disconnect worklet so no more audio is sent
+    if (_workletNode) { _workletNode.port.onmessage = null; _workletNode.disconnect(); }
+    _micStream.getTracks().forEach(t => t.stop());
+    if (_recCtx) await _recCtx.close();
+    _micStream = null; _workletNode = null; _recCtx = null;
+    // Tell server to flush remaining Deepgram buffer
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'end_of_speech' }));
+    }
+    setStatus('Processing…');
+  }
+
+  // ── Button events (hold to talk) ──────────────────────────────────
+  btn.addEventListener('mousedown',  startRecording);
+  btn.addEventListener('mouseup',    stopRecording);
+  btn.addEventListener('mouseleave', stopRecording);
+
+  // Touch support
+  btn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
+  btn.addEventListener('touchend',   (e) => { e.preventDefault(); stopRecording(); });
+
+  // ── Streaming audio queue ────────────────────────────────────────
+  let audioCtx = null;
+  let audioQueue = [];
+  let isPlaying = false;
+
+  function getAudioCtx() {
+    if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AudioContext();
+    return audioCtx;
+  }
+
+  function enqueueAudio(arrayBuffer) {
+    setBtnState('speaking');
+    setStatus('Speaking…');
+    const ctx = getAudioCtx();
+    // Raw PCM f32le — build AudioBuffer directly, no container parsing needed
+    const samples = new Float32Array(arrayBuffer);
+    if (samples.length === 0) return;
+    const buffer = ctx.createBuffer(1, samples.length, 44100);
+    buffer.copyToChannel(samples, 0);
+    audioQueue.push(buffer);
+    if (!isPlaying) playNext(ctx);
+  }
+
+  function playNext(ctx) {
+    if (audioQueue.length === 0) {
+      isPlaying = false;
+      setBtnState('idle');
+      setStatus('Click and hold to speak');
+      return;
+    }
+    isPlaying = true;
+    const source = ctx.createBufferSource();
+    source.buffer = audioQueue.shift();
+    source.connect(ctx.destination);
+    source.start();
+    source.onended = () => playNext(ctx);
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────
+  function setStatus(text) { statusEl.textContent = text; }
+
+  function setBtnState(state) {
+    btn.className = state === 'idle' ? '' : state;
+    btn.textContent = {
+      idle:      'Hold to Talk',
+      listening: 'Listening…',
+      thinking:  'Thinking…',
+      speaking:  'Speaking…',
+    }[state] ?? 'Hold to Talk';
+  }
+
+  function appendTurn(role, text) {
+    const div = document.createElement('div');
+    div.className = `turn ${role}`;
+    div.innerHTML = `<div class="label">${role === 'user' ? 'You' : 'Assistant'}</div>
+                     <div class="text">${escapeHtml(text)}</div>`;
+    transcriptEl.appendChild(div);
+    div.scrollIntoView({ behavior: 'smooth' });
+    return div;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+
+</body>
+</html>
