@@ -20,6 +20,7 @@
 
     h1 { font-size: 1.4rem; font-weight: 500; margin-bottom: 2rem; color: #888; }
 
+    /* Mic button */
     #btn {
       width: 120px;
       height: 120px;
@@ -29,13 +30,34 @@
       color: #f0f0f0;
       font-size: 0.85rem;
       cursor: pointer;
-      transition: border-color 0.2s, background 0.2s;
+      transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
       outline: none;
+      position: relative;
     }
 
+    /* Pulsing ring shown while mic is on */
+    #btn::after {
+      content: '';
+      position: absolute;
+      inset: -8px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      transition: border-color 0.2s;
+    }
+
+    #btn.ready    { border-color: #4a9eff; background: #0d1a2d; }
+    #btn.ready::after { border-color: rgba(74,158,255,0.25); animation: pulse 2s ease-in-out infinite; }
+
     #btn.listening  { border-color: #e53e3e; background: #2d1111; }
+    #btn.listening::after { border-color: rgba(229,62,62,0.4); animation: pulse 0.8s ease-in-out infinite; }
+
     #btn.thinking   { border-color: #d69e2e; background: #2d2211; }
     #btn.speaking   { border-color: #38a169; background: #112d1a; }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1);   opacity: 1; }
+      50%       { transform: scale(1.12); opacity: 0.6; }
+    }
 
     #status {
       margin-top: 1.5rem;
@@ -61,8 +83,8 @@
 
 <h1>Voice Assistant</h1>
 
-<button id="btn">Hold to Talk</button>
-<div id="status">Click and hold to speak</div>
+<button id="btn">Start</button>
+<div id="status">Click to start a conversation</div>
 
 <div id="transcript"></div>
 
@@ -75,40 +97,72 @@
   const ws = new WebSocket(`ws://${location.host}/ws/audio`);
   ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => setStatus('Ready');
-  ws.onclose = () => setStatus('Disconnected');
-  ws.onerror = () => setStatus('Connection error');
+  ws.onopen  = () => {};
+  ws.onclose = () => { setStatus('Disconnected'); setBtnState('idle'); };
+  ws.onerror = () => { setStatus('Connection error'); setBtnState('idle'); };
 
   ws.onmessage = (event) => {
     if (typeof event.data === 'string') {
       const msg = JSON.parse(event.data);
 
+      if (msg.type === 'vad_state') {
+        // Server VAD tells us whether user is speaking
+        if (micActive) {
+          if (msg.speaking) {
+            setBtnState('listening');
+            setStatus('Listening…');
+          } else if (btnState === 'listening') {
+            // Back to ready — waiting for next speech
+            setBtnState('ready');
+            setStatus('Mic on — speak anytime');
+          }
+        }
+      }
+
       if (msg.type === 'transcript') {
         appendTurn('user', msg.text);
-        setStatus('Thinking…');
         setBtnState('thinking');
+        setStatus('Thinking…');
       }
+
       if (msg.type === 'response_text') {
         appendTurn('ai', msg.text);
       }
+
       if (msg.type === 'tts_done') {
-        // Re-enable button only after all audio has been queued
+        ignoreAudio = false;  // safe to play audio again
+        currentTtsGen = msg.gen;  // store generation so playback_ended can echo it back
         if (!isPlaying) {
-          setBtnState('idle');
-          setStatus('Click and hold to speak');
+          setBtnState('ready');
+          setStatus('Mic on — speak anytime');
         }
       }
+
+      if (msg.type === 'barge_in') {
+        ignoreAudio = true;   // discard any chunks still arriving from the interrupted response
+        stopPlayback();
+        setBtnState('listening');
+        setStatus('Listening…');
+      }
+
       if (msg.type === 'error') {
         setStatus('Error: ' + msg.message);
-        setBtnState('idle');
+        if (micActive) setBtnState('ready');
       }
     } else {
-      enqueueAudio(event.data);
+      if (!ignoreAudio) enqueueAudio(event.data);
     }
   };
 
-  // ── AudioWorklet PCM streaming ────────────────────────────────────
-  // Inline processor: converts float32 mic samples → int16 PCM chunks
+  // ── Mic state ─────────────────────────────────────────────────────
+  let micActive   = false;
+  let btnState    = 'idle';
+
+  let _micStream   = null;
+  let _workletNode = null;
+  let _recCtx      = null;
+
+  // Inline AudioWorklet: float32 → int16 PCM
   const _workletCode = `
     class PCMProcessor extends AudioWorkletProcessor {
       process(inputs) {
@@ -128,65 +182,84 @@
   const _workletBlob = new Blob([_workletCode], { type: 'application/javascript' });
   const _workletUrl  = URL.createObjectURL(_workletBlob);
 
-  let _micStream   = null;
-  let _workletNode = null;
-  let _recCtx      = null;   // separate AudioContext for recording at 16 kHz
+  async function startMic() {
+    try {
+      // Echo cancellation + noise suppression so VAD on server isn't
+      // triggered by the bot's own TTS audio coming from the speakers
+      _micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+      _recCtx = new AudioContext({ sampleRate: 16000 });
 
-  async function startRecording() {
-    _micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    _recCtx    = new AudioContext({ sampleRate: 16000 });
+      await _recCtx.audioWorklet.addModule(_workletUrl);
+      const source = _recCtx.createMediaStreamSource(_micStream);
+      _workletNode = new AudioWorkletNode(_recCtx, 'pcm-processor');
 
-    await _recCtx.audioWorklet.addModule(_workletUrl);
-    const source     = _recCtx.createMediaStreamSource(_micStream);
-    _workletNode     = new AudioWorkletNode(_recCtx, 'pcm-processor');
+      // Send ALL audio continuously — server-side VAD decides what is speech
+      _workletNode.port.onmessage = (e) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
+      };
 
-    _workletNode.port.onmessage = (e) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
-    };
-
-    source.connect(_workletNode);
-    setBtnState('listening');
-    setStatus('Listening…');
-  }
-
-  async function stopRecording() {
-    if (!_micStream) return;
-    // Disconnect worklet so no more audio is sent
-    if (_workletNode) { _workletNode.port.onmessage = null; _workletNode.disconnect(); }
-    _micStream.getTracks().forEach(t => t.stop());
-    if (_recCtx) await _recCtx.close();
-    _micStream = null; _workletNode = null; _recCtx = null;
-    // Tell server to flush remaining Deepgram buffer
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'end_of_speech' }));
+      source.connect(_workletNode);
+      micActive = true;
+      setBtnState('ready');
+      setStatus('Mic on — speak anytime');
+    } catch (err) {
+      setStatus('Mic error: ' + err.message);
     }
-    setStatus('Processing…');
   }
 
-  // ── Button events (hold to talk) ──────────────────────────────────
-  btn.addEventListener('mousedown',  startRecording);
-  btn.addEventListener('mouseup',    stopRecording);
-  btn.addEventListener('mouseleave', stopRecording);
+  function stopMic() {
+    if (_workletNode) { _workletNode.port.onmessage = null; _workletNode.disconnect(); }
+    if (_micStream)   { _micStream.getTracks().forEach(t => t.stop()); }
+    if (_recCtx)      { _recCtx.close(); }
+    _micStream = null; _workletNode = null; _recCtx = null;
+    micActive = false;
+    stopPlayback();
+    setBtnState('idle');
+    setStatus('Click to start a conversation');
+  }
 
-  // Touch support
-  btn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
-  btn.addEventListener('touchend',   (e) => { e.preventDefault(); stopRecording(); });
+  // ── Toggle button ─────────────────────────────────────────────────
+  btn.addEventListener('click', () => {
+    if (!micActive) {
+      startMic();
+    } else {
+      stopMic();
+    }
+  });
 
-  // ── Streaming audio queue ────────────────────────────────────────
-  let audioCtx = null;
-  let audioQueue = [];
-  let isPlaying = false;
+  // ── Streaming audio playback ──────────────────────────────────────
+  let audioCtx      = null;
+  let audioQueue    = [];
+  let isPlaying     = false;
+  let currentSource = null;   // track active BufferSource for barge-in stopping
+  let ignoreAudio   = false;  // true after barge-in until tts_done clears it
+  let currentTtsGen = 0;      // echoed back in playback_ended so server can discard stale ones
 
   function getAudioCtx() {
     if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AudioContext();
     return audioCtx;
   }
 
+  function stopPlayback() {
+    audioQueue = [];
+    if (currentSource) {
+      currentSource.onended = null;  // cancel handler so playNext is never called,
+                                     // preventing a spurious playback_ended to the server
+      try { currentSource.stop(); } catch (_) {}
+      currentSource = null;
+    }
+    isPlaying = false;
+  }
+
   function enqueueAudio(arrayBuffer) {
     setBtnState('speaking');
     setStatus('Speaking…');
     const ctx = getAudioCtx();
-    // Raw PCM f32le — build AudioBuffer directly, no container parsing needed
     const samples = new Float32Array(arrayBuffer);
     if (samples.length === 0) return;
     const buffer = ctx.createBuffer(1, samples.length, 44100);
@@ -198,8 +271,16 @@
   function playNext(ctx) {
     if (audioQueue.length === 0) {
       isPlaying = false;
-      setBtnState('idle');
-      setStatus('Click and hold to speak');
+      currentSource = null;
+      // Tell server the browser has finished playing — only now is barge-in safe to detect.
+      // Echo back currentTtsGen so the server can discard stale playback_ended messages.
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'playback_ended', gen: currentTtsGen }));
+      }
+      if (micActive) {
+        setBtnState('ready');
+        setStatus('Mic on — speak anytime');
+      }
       return;
     }
     isPlaying = true;
@@ -207,6 +288,7 @@
     source.buffer = audioQueue.shift();
     source.connect(ctx.destination);
     source.start();
+    currentSource = source;
     source.onended = () => playNext(ctx);
   }
 
@@ -214,13 +296,15 @@
   function setStatus(text) { statusEl.textContent = text; }
 
   function setBtnState(state) {
-    btn.className = state === 'idle' ? '' : state;
+    btnState = state;
+    btn.className = (state === 'idle') ? '' : state;
     btn.textContent = {
-      idle:      'Hold to Talk',
+      idle:      'Start',
+      ready:     'Mic On',
       listening: 'Listening…',
       thinking:  'Thinking…',
       speaking:  'Speaking…',
-    }[state] ?? 'Hold to Talk';
+    }[state] ?? 'Mic On';
   }
 
   function appendTurn(role, text) {
@@ -230,7 +314,6 @@
                      <div class="text">${escapeHtml(text)}</div>`;
     transcriptEl.appendChild(div);
     div.scrollIntoView({ behavior: 'smooth' });
-    return div;
   }
 
   function escapeHtml(str) {

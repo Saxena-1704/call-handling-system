@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ── Audio constants (Twilio media-stream defaults) ────────────────────
 SAMPLE_RATE = 8000          # Hz  (Twilio L16)
 SAMPLE_WIDTH = 2            # bytes (16-bit PCM)
-FRAME_DURATION_MS = 20      # ms per frame
+FRAME_DURATION_MS = 32  # Silero VAD minimum: 256 samples at 8 kHz, 512 at 16 kHz      # ms per frame
 FRAME_SIZE = SAMPLE_RATE * FRAME_DURATION_MS // 1000  # 160 samples
 
 
@@ -34,10 +34,13 @@ class VADProcessor:
 
     def __init__(
         self,
+        sample_rate: int = 16000,
         threshold: float = 0.5,
         min_speech_ms: int = 250,
         min_silence_ms: int = 300,
     ) -> None:
+        self.sample_rate = sample_rate
+        self.frame_size = sample_rate * FRAME_DURATION_MS // 1000
         self.threshold = threshold
         self.min_speech_frames = min_speech_ms // FRAME_DURATION_MS
         self.min_silence_frames = min_silence_ms // FRAME_DURATION_MS
@@ -57,6 +60,7 @@ class VADProcessor:
             repo_or_dir="snakers4/silero-vad",
             model="silero_vad",
             force_reload=False,
+            trust_repo=True,
             onnx=True,
         )
         logger.info("Silero VAD model loaded")
@@ -80,7 +84,7 @@ class VADProcessor:
         samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         tensor = torch.from_numpy(samples)
 
-        confidence: float = self._model(tensor, SAMPLE_RATE).item()
+        confidence: float = self._model(tensor, self.sample_rate).item()
 
         if confidence >= self.threshold:
             self._speech_count += 1
@@ -126,7 +130,7 @@ class AudioStreamHandler:
         self._on_speech_end = on_speech_end
         self._on_barge_in = on_barge_in
 
-        self.vad = VADProcessor(threshold=vad_threshold)
+        self.vad = VADProcessor(sample_rate=SAMPLE_RATE, threshold=vad_threshold)
         self.call_sid: str = ""
 
         # Queues
@@ -233,12 +237,17 @@ class AudioStreamHandler:
         logger.info("Barge-in triggered — flushing TTS buffer")
         self._is_playing_tts = False
 
-        # Drain outbound queue
+        # Drain server-side outbound queue (stops new chunks being sent)
         while not self._outbound_queue.empty():
             try:
                 self._outbound_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+
+        # TODO (telephony): send Twilio/Telnyx a "clear" event here to discard
+        # audio already buffered on the carrier side:
+        #   await self.ws.send_json({"event": "clear", "streamSid": self.call_sid})
+        # Without this, the caller hears a brief continuation after barge-in.
 
         if self._on_barge_in:
             await self._on_barge_in()

@@ -3,6 +3,9 @@ uvicorn[standard]
 python-dotenv
 jinja2
 python-multipart
+torch
+torchaudio
+onnxruntime
 
 # STT
 deepgram-sdk
