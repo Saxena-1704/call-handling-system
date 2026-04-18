@@ -9,8 +9,14 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
 
-from app.services import stt_service, llm_service, tts_service
+from app.config import settings
+from app.services import stt_service, llm_service
 from app.infrastructure.audio_stream_handler import VADProcessor
+
+if settings.tts_provider == "sarvam":
+    from app.services import tts_service_sarvam as tts_service
+else:
+    from app.services import tts_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

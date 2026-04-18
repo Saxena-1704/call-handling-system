@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+
+This is a framework of a call handling system. AI handles multiple calls that are made to a number. for now telephony is not added and it is a bare working version working on browser.
+
 ## Commands
 
 ```bash

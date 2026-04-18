@@ -1,0 +1,71 @@
+ Here's a detailed breakdown of every issue and the lesson behind each:                                                                                         
+                                                                                      
+  ---
+  1. Sarvam WebSocket closes after each utterance                                                                                                                   
+  What happened: The Cartesia TTS keeps one WebSocket open for the entire browser session — you connect once, then send multiple texts through it. I initially     wrote the Sarvam service the same way: open the WebSocket in session(), reuse it across multiple stream() calls.
+
+  Why it broke: After Sarvam sends the "final" event for an utterance, it closes the connection (sends WebSocket close frame 1000 OK). The second stream() call
+  tried to write to a dead socket → ConnectionClosedOK.
+
+  The fix: Open a fresh Sarvam WebSocket inside every stream() call, not once in session(). The session() context manager became a no-op wrapper just to keep the   interface identical to Cartesia's.
+
+  Lesson: Don't assume two WebSocket APIs have the same lifecycle. Some keep connections alive for multiplexing (Cartesia), others treat each connection as
+  one-shot (Sarvam). Always check how the provider handles connection reuse — look for docs about "persistent connections" or "connection limits", and test with
+  a second utterance.
+
+  ---
+  2. Wrong audio codec name: "pcm" vs "linear16"
+
+  What happened: The Sarvam docs page (sarvam_ws.txt) lists the codec as pcm (LINEAR16). So I passed output_audio_codec="pcm" to configure().
+
+  Why it broke: The actual Sarvam SDK uses a typed enum/literal for the codec field:
+  Literal['linear16', 'mulaw', 'alaw', 'opus', 'flac', 'aac', 'wav', 'mp3']
+  The string "pcm" isn't in this list. The SDK's Pydantic model serialized it in a way the server rejected → "Input parameters has to be a valid dictionary"
+  (error 422).
+
+  The fix: Use "linear16" instead of "pcm".
+
+  Lesson: Documentation and SDK can disagree. The docs are written for the raw WebSocket protocol; the SDK wraps it with its own types. When using an SDK, always   check the actual type definitions — look at the source code or use your IDE's autocomplete to see what values are accepted. A quick way to check:
+  python -c "from sarvamai.types.configure_connection_data_output_audio_codec import ConfigureConnectionDataOutputAudioCodec;
+  print(ConfigureConnectionDataOutputAudioCodec)"
+
+  ---
+  3. Wrong sample rate: 22050 vs 24000
+
+  What happened: I set _SARVAM_SAMPLE_RATE = 22050 because that's a common TTS default.
+
+  Why it matters: The browser plays audio at 44100 Hz. The server resamples Sarvam's output from _SARVAM_SAMPLE_RATE → 44100 using interpolation. If this source
+  rate is wrong, the resampling ratio is wrong, and the audio plays at the wrong pitch/speed — or could sound like silence/noise.
+
+  The fix: bulbul:v3 defaults to 24000 Hz (found in the SDK's docstring for speech_sample_rate). Changed to _SARVAM_SAMPLE_RATE = 24000.
+
+  Lesson: Sample rate must match exactly what the provider outputs. Don't guess — find it in the SDK source:
+  speech_sample_rate: ...
+      Specifies the sample rate of the output audio.
+      Model-specific defaults:
+      - bulbul:v2: 22050 Hz
+      - bulbul:v3: 24000 Hz
+  If you can't find it documented, save a raw chunk to disk and inspect it in Audacity — wrong sample rate is immediately obvious (chipmunk voice = rate too low,   slowed-down voice = rate too high).
+
+  ---
+  4. Provider switching needed env config
+
+  What happened: After adding the Sarvam service, the server still tried to connect to Cartesia and got HTTP 402 (payment required / expired credits).
+
+  Why it broke: The conditional import in main.py reads settings.tts_provider, which defaults to "cartesia". Without TTS_PROVIDER=sarvam in the .env file, the
+  old Cartesia path ran.
+
+  Lesson: When you add a provider toggle, remember that someone actually has to set it. The code change alone doesn't activate it. Always check:
+  - Is the env var set in .env?
+  - Is the API key for the new provider also set?
+  - Does the default value make sense (defaulting to the old provider is correct — it avoids breaking existing setups)?
+
+  ---
+  General checklist when integrating a new TTS (or any streaming API)
+
+  1. Check the SDK types, not just the docs. Docs describe the protocol; the SDK may use different names, enums, or structures.
+  2. Verify the connection lifecycle. Does the WebSocket stay open? Does it close after each response? Test with 2+ sequential requests.
+  3. Know your audio format chain. What format does the provider output (encoding, sample rate, bit depth)? What does the consumer expect? Convert explicitly and   document the chain.
+  4. Test with actual audio playback, not just log output. "0 chunks yielded" and "chunks yielded but no sound" are very different bugs.
+  5. Log the first chunk's raw bytes when debugging audio. A hex dump of the first 20 bytes tells you instantly if you're getting PCM (varied bytes), MP3 (ff fb
+  or 49 44 33), or WAV (52 49 46 46 = "RIFF").

@@ -1,0 +1,150 @@
+Streaming Text-to-Speech API
+
+
+Copy page
+
+WebSocket-based streaming endpoint that sends audio chunks progressively as text is processed. Connect once, stream text in, receive audio out — no polling, no repeated HTTP calls.
+
+For complete API reference documentation, see the Text-to-Speech API Reference section.
+
+Common use cases:
+
+Conversational AI agents — Stream TTS responses in real time for voice-based assistants
+Interactive podcasts — Generate and play back dialogue on the fly with minimal delay
+Low-latency applications — Any scenario where time-to-first-byte (TTFB) matters (IVR, live narration, kiosks)
+Why WebSocket Streaming
+Low Latency Playback
+Audio playback begins as soon as the first chunk is synthesized — no need to wait for the full response.
+
+11 Languages (10 Indian + English)
+Hindi, Bengali, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Punjabi, Odia, and English (Indian accent).
+
+Persistent Connection
+Single WebSocket connection handles multiple text to speech conversions. Send config once, then stream text continuously.
+
+SDK Support
+Python (AsyncSarvamAI) and JavaScript (SarvamAIClient) SDKs with built-in async/await and event-driven patterns for seamless integration.
+
+Code Examples
+Best Practices
+Always send the config message first
+Use flush messages strategically to ensure complete text processing
+Send ping messages to maintain long-running connections
+
+Python
+
+JavaScript
+
+
+import asyncio
+import base64
+from sarvamai import AsyncSarvamAI, AudioOutput
+async def tts_stream():
+    client = AsyncSarvamAI(api_subscription_key="YOUR_SARVAM_API_KEY")
+    async with client.text_to_speech_streaming.connect(model="bulbul:v3") as ws:
+        await ws.configure(target_language_code="hi-IN", speaker="shubh")
+        print("Sent configuration")
+        long_text = (
+            "भारत की संस्कृति विश्व की सबसे प्राचीन और समृद्ध संस्कृतियों में से एक है।"
+            "यह विविधता, सहिष्णुता और परंपराओं का अद्भुत संगम है, "
+            "जिसमें विभिन्न धर्म, भाषाएं, त्योहार, संगीत, नृत्य, वास्तुकला और जीवनशैली शामिल हैं।"
+        )
+        await ws.convert(long_text)
+        print("Sent text message")
+        await ws.flush()
+        print("Flushed buffer")
+        chunk_count = 0
+        with open("output.mp3", "wb") as f:
+            async for message in ws:
+                if isinstance(message, AudioOutput):
+                    chunk_count += 1
+                    audio_chunk = base64.b64decode(message.data.audio)
+                    f.write(audio_chunk)
+                    f.flush()
+        print(f"All {chunk_count} chunks saved to output.mp3")
+        print("Audio generation complete")
+        if hasattr(ws, "_websocket") and not ws._websocket.closed:
+            await ws._websocket.close()
+            print("WebSocket connection closed.")
+if __name__ == "__main__":
+    asyncio.run(tts_stream())
+# --- Notebook/Colab usage ---
+# await tts_stream()
+End of Speech Signal
+The TTS streaming API now supports an end of speech signal that allows for clean stream termination when speech generation is complete.
+
+Using send_completion_event
+When you set send_completion_event=True in the connection, the API will send a completion event when speech generation ends, allowing your application to handle stream termination gracefully.
+
+Python
+
+
+import asyncio
+import base64
+from sarvamai import AsyncSarvamAI, AudioOutput, EventResponse
+async def tts_stream():
+    client = AsyncSarvamAI(api_subscription_key="YOUR_SARVAM_API_KEY")
+    async with client.text_to_speech_streaming.connect(
+        model="bulbul:v3", send_completion_event=True
+    ) as ws:
+        await ws.configure(
+            target_language_code="hi-IN",
+            speaker="shubh",
+        )
+        print("Sent configuration")
+        long_text = (
+            "भारत की संस्कृति विश्व की सबसे प्राचीन और समृद्ध "
+            "संस्कृतियों में से एक है।"
+            "यह विविधता, सहिष्णुता और परंपराओं का अद्भुत संगम है, "
+            "जिसमें विभिन्न धर्म, भाषाएं, त्योहार, संगीत, नृत्य, "
+            "वास्तुकला और जीवनशैली शामिल हैं।"
+        )
+        await ws.convert(long_text)
+        print("Sent text message")
+        await ws.flush()
+        print("Flushed buffer")
+        chunk_count = 0
+        with open("output.mp3", "wb") as f:
+            async for message in ws:
+                if isinstance(message, AudioOutput):
+                    chunk_count += 1
+                    audio_chunk = base64.b64decode(message.data.audio)
+                    f.write(audio_chunk)
+                    f.flush()
+                elif isinstance(message, EventResponse):
+                    print(f"Received completion event: {message.data.event_type}")
+                    # Break when we receive the final event
+                    if message.data.event_type == "final":
+                        break
+        print(f"All {chunk_count} chunks saved to output.mp3")
+        print("Audio generation complete")
+if __name__ == "__main__":
+    asyncio.run(tts_stream())
+# --- Notebook/Colab usage ---
+# await tts_stream()
+Streaming TTS WebSocket – Integration Guide
+Easily convert text to speech in real time using Sarvam’s low-latency WebSocket-based TTS API.
+
+Input Message Types
+Config Message
+Text Message
+Flush Message
+Ping Message
+Sets up voice parameters and must be the first message sent after connection. Parameters:
+
+min_buffer_size: Minimum character length that triggers buffer flushing for TTS model processing
+max_chunk_length: Maximum length for sentence splitting (adjust based on content length)
+output_audio_codec: Supports multiple formats: mp3, wav, aac, opus, flac, pcm (LINEAR16), mulaw (μ-law), and alaw (A-law)
+output_audio_bitrate: Choose from 5 supported bitrate options
+{
+  "type": "config",
+  "data": {
+    "speaker": "shubh",
+    "target_language_code": "en-IN",
+    "pace": 1.2,
+    "min_buffer_size": 50,
+    "max_chunk_length": 200,
+    "output_audio_codec": "mp3",
+    "output_audio_bitrate": "128k"
+  }
+}

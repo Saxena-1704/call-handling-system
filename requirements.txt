@@ -16,6 +16,7 @@ langchain-groq
 
 # TTS
 cartesia
+sarvamai
 
 # Audio
 numpy
